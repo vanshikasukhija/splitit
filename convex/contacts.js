@@ -1,0 +1,359 @@
+// convex/contacts.js
+import { query, mutation } from "./_generated/server";
+import { v } from "convex/values";
+import { internal } from "./_generated/api";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   1. getAllContacts – 1‑to‑1 expense contacts + groups
+   ──────────────────────────────────────────────────────────────────────── */
+export const getAllContacts = query({
+  handler: async (ctx) => {
+    // Use the centralized getCurrentUser instead of duplicating auth logic
+    const currentUser = await ctx.runQuery(internal.users.getCurrentUser);
+
+    /* ── personal expenses where YOU are the payer ─────────────────────── */
+    const expensesYouPaid = await ctx.db
+      .query("expenses")
+      .withIndex("by_user_and_group", (q) =>
+        q.eq("paidByUserId", currentUser._id).eq("groupId", undefined)
+      )
+      .collect();
+
+    /* ── personal expenses where YOU are **not** the payer ─────────────── */
+    const expensesNotPaidByYou = (
+      await ctx.db
+        .query("expenses")
+        .withIndex("by_group", (q) => q.eq("groupId", undefined)) // only 1‑to‑1
+        .collect()
+    ).filter(
+      (e) =>
+        e.paidByUserId !== currentUser._id &&
+        e.splits.some((s) => s.userId === currentUser._id)
+    );
+
+    const personalExpenses = [...expensesYouPaid, ...expensesNotPaidByYou];
+
+    /* ── extract unique counterpart IDs ─────────────────────────────────── */
+    const contactIds = new Set();
+    personalExpenses.forEach((exp) => {
+      if (exp.paidByUserId !== currentUser._id)
+        contactIds.add(exp.paidByUserId);
+
+      exp.splits.forEach((s) => {
+        if (s.userId !== currentUser._id) contactIds.add(s.userId);
+      });
+    });
+
+    /* ── fetch user docs ───────────────────────────────────────────────── */
+    const contactUsers = await Promise.all(
+      [...contactIds].map(async (id) => {
+        const u = await ctx.db.get(id);
+        return u
+          ? {
+              id: u._id,
+              name: u.name,
+              email: u.email,
+              imageUrl: u.imageUrl,
+              type: "user",
+            }
+          : null;
+      })
+    );
+
+    /* ── groups where current user is a member ─────────────────────────── */
+    const userGroups = (await ctx.db.query("groups").collect())
+      .filter((g) => g.members.some((m) => m.userId === currentUser._id))
+      .map((g) => ({
+        id: g._id,
+        name: g.name,
+        description: g.description,
+        memberCount: g.members.length,
+        type: "group",
+      }));
+
+    /* sort alphabetically */
+    contactUsers.sort((a, b) => a?.name.localeCompare(b?.name));
+    userGroups.sort((a, b) => a.name.localeCompare(b.name));
+
+    return { users: contactUsers.filter(Boolean), groups: userGroups };
+  },
+});
+
+/* ──────────────────────────────────────────────────────────────────────────
+   2. createGroup – create a new group
+   ──────────────────────────────────────────────────────────────────────── */
+export const createGroup = mutation({
+  args: {
+    name: v.string(),
+    description: v.optional(v.string()),
+    members: v.array(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+    // Use the centralized getCurrentUser instead of duplicating auth logic
+    const currentUser = await ctx.runQuery(internal.users.getCurrentUser);
+
+    if (!args.name.trim()) throw new Error("Group name cannot be empty");
+
+    const uniqueMembers = new Set(args.members);
+    uniqueMembers.add(currentUser._id); // ensure creator
+
+    // Validate that all member users exist
+    for (const id of uniqueMembers) {
+      if (!(await ctx.db.get(id)))
+        throw new Error(`User with ID ${id} not found`);
+    }
+
+    return await ctx.db.insert("groups", {
+      name: args.name.trim(),
+      description: args.description?.trim() ?? "",
+      createdBy: currentUser._id,
+      members: [...uniqueMembers].map((id) => ({
+        userId: id,
+        role: id === currentUser._id ? "admin" : "member",
+        joinedAt: Date.now(),
+      })),
+    });
+  },
+});
+
+
+
+/*
+notes:
+
+This file exports two server-side Convex functions:
+1. getAllContacts — a query that returns 1-to-1 expense contacts and groups the current user belongs to.
+2. createGroup — a mutation that validates arguments and inserts a new groups document.
+Both run on the Convex server and use ctx (the Convex context) to access the DB and other helper queries.
+
+Top-of-file imports (what they mean)
+import { query, mutation } from "./_generated/server";
+import { v } from "convex/values";
+import { internal } from "./_generated/api";
+
+query / mutation — helpers that register this file’s functions as Convex server endpoints.
+query = read-only operation (safe to call often).
+mutation = operation that can change the DB.
+v — Convex value validators used to declare and enforce argument types for mutations.
+internal — namespace for other internal queries/mutations generated by Convex; here it’s used to call internal.users.getCurrentUser (a centralized way to obtain the current user instead of reimplementing auth).
+
+
+1) getAllContacts — full annotated breakdown
+export const getAllContacts = query({
+  handler: async (ctx) => {
+
+Defines a Convex query named getAllContacts. The handler receives a ctx object that provides ctx.db, ctx.runQuery, etc.
+
+
+1.1 Get the current user (centralized auth)
+const currentUser = await ctx.runQuery(internal.users.getCurrentUser);
+-> Calls another server-side query internal.users.getCurrentUser to fetch the current user document (or user's reference).
+-> Using a centralized function avoids repeating auth logic across handlers.
+
+
+1.2 Query #1 — personal expenses where you are the payer
+const expensesYouPaid = await ctx.db
+  .query("expenses")
+  .withIndex("by_user_and_group", (q) =>
+    q.eq("paidByUserId", currentUser._id).eq("groupId", undefined)
+  )
+  .collect();
+
+What this does?
+-> Queries the expenses collection using the index by_user_and_group.
+
+Filters:
+-> paidByUserId === currentUser._id → you are the payer.
+-> groupId === undefined → this is a 1-to-1 (non-group) expense (the code treats groupId undefined as "not a group").
+-> .collect() returns an array of matching expense documents.
+
+Why use an index?
+-> withIndex("by_user_and_group", ...) forces the query to use a prebuilt index, which is faster / scalable than scanning all documents. That index must exist in Convex schema.
+
+
+1.3 Query #2 — personal 1-to-1 expenses where you are not the payer but you are in the splits
+const expensesNotPaidByYou = (
+  await ctx.db
+    .query("expenses")
+    .withIndex("by_group", (q) => q.eq("groupId", undefined)) // only 1-to-1
+    .collect()
+).filter(
+  (e) =>
+    e.paidByUserId !== currentUser._id &&
+    e.splits.some((s) => s.userId === currentUser._id)
+);
+
+Two-step approach
+-> Query all expenses with groupId === undefined (i.e., all 1-to-1 expenses).
+-> In-memory .filter(...) to keep only those where:
+    -> The payer is not the current user (e.paidByUserId !== currentUser._id), and
+    -> The splits array includes a split for the current user (e.splits.some(s => s.userId === currentUser._id)).
+
+Why not include those filters in the DB query?
+-> Because splits is an array of objects, querying for splits.userId === currentUser._id may require a different index or schema. This in-memory filter is simpler but may be less efficient if there are many 1-to-1 expense docs.
+
+
+1.4 Combine the two sets of personal expenses
+const personalExpenses = [...expensesYouPaid, ...expensesNotPaidByYou];
+-> Simple concatenation — personalExpenses now contains all 1-to-1 expenses that involve the current user (either as payer or as a participant).
+
+
+1.5 Extract unique counterpart IDs (people you interacted with)
+const contactIds = new Set();
+personalExpenses.forEach((exp) => {
+  if (exp.paidByUserId !== currentUser._id)
+    contactIds.add(exp.paidByUserId);
+
+  exp.splits.forEach((s) => {
+    if (s.userId !== currentUser._id) contactIds.add(s.userId);
+  });
+});
+
+Logic:
+For each expense:
+-> If the expense was paid by someone else, include that paidByUserId as a contact.
+-> For every split in exp.splits, add s.userId except when that userId is the current user.
+-> Using a Set ensures uniqueness (no duplicate contact IDs).
+
+Notes:
+-> e → each expense object returned from the DB.
+-> s → each split object inside e.splits (the array that defines how an expense is divided among users).
+
+1.6 Fetch user documents for those contact IDs (Query #3 — many get calls)
+const contactUsers = await Promise.all(
+  [...contactIds].map(async (id) => {
+    const u = await ctx.db.get(id);
+    return u
+      ? {
+          id: u._id,
+          name: u.name,
+          email: u.email,
+          imageUrl: u.imageUrl,
+          type: "user",
+        }
+      : null;
+  })
+);
+
+What happens?
+-> contactIds is converted to an array. For each id, ctx.db.get(id) fetches that user document.
+-> The mapping returns a simplified user object or null if the user doc does not exist.
+-> Promise.all fetches all users in parallel.
+
+Notes:
+-> ctx.db.get(id) is a single-document lookup — efficient for small numbers of IDs. If contactIds is large, consider batching or an index-based query.
+-> The syntax [...contactIds] is the spread operator (...) inside an array literal [].
+-> It converts the Set into a regular array.
+
+What is Batching?
+-> Batching = grouping multiple small async/database calls into one larger call.
+-> Convex automatically batches queries like ctx.db.get() when you run many in parallel.
+-> This saves time, avoids extra round trips, and improves performance.
+
+
+1.7 Query #4 — groups the current user is a member of
+const userGroups = (await ctx.db.query("groups").collect())
+  .filter((g) => g.members.some((m) => m.userId === currentUser._id))
+  .map((g) => ({
+    id: g._id,
+    name: g.name,
+    description: g.description,
+    memberCount: g.members.length,
+    type: "group",
+  }));
+
+What this does?
+-> Loads all groups documents (.collect()).
+-> In-memory .filter(...) to keep groups where members array contains an object with userId === currentUser._id.
+-> Maps the matched group docs to a simplified shape for the API consumer.
+
+Performance note:
+-> query("groups").collect() loads all groups, then filters them in memory. For many groups this is inefficient. A better approach is to have an index on members.userId and query by that index (if Convex supports indexing nested array fields), or maintain a reverse mapping.
+
+
+1.8 Sort and return
+contactUsers.sort((a, b) => a?.name.localeCompare(b?.name));
+userGroups.sort((a, b) => a.name.localeCompare(b.name));
+return { users: contactUsers.filter(Boolean), groups: userGroups };
+
+-> Sorts users and groups alphabetically by name.
+-> Returns { users, groups }.
+-> contactUsers.filter(Boolean) removes any null entries (where a user id had no doc).
+
+Important gotcha:
+-> The code sorts contactUsers before filtering out null. If contactUsers contains any null, calling a?.name.localeCompare(...) may still throw
+because a?.name can be undefined and .localeCompare on undefined throws. Safer order: first contactUsers = contactUsers.filter(Boolean) then sort,
+or write a safe comparator.
+
+
+2) createGroup — full annotated breakdown
+export const createGroup = mutation({
+  args: {
+    name: v.string(),
+    description: v.optional(v.string()),
+    members: v.array(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+
+-> Declares a Convex mutation named createGroup.
+-> args are validated with v before the handler runs:
+    -> name — required string.
+    -> description — optional string.
+    -> members — array of ids that reference the users collection (v.id("users")).
+
+
+2.1 Get current user
+const currentUser = await ctx.runQuery(internal.users.getCurrentUser);
+
+-> Same centralized auth call to identify the creator.
+
+
+2.2 Validate name
+if (!args.name.trim()) throw new Error("Group name cannot be empty");
+
+-> Ensures the provided name, after trimming whitespace, is not an empty string. If empty, throws an error that will bubble to the client.
+
+
+2.3 Ensure unique members and include the creator
+const uniqueMembers = new Set(args.members);
+uniqueMembers.add(currentUser._id); // ensure creator
+
+-> Uses a Set to remove duplicate IDs.
+-> Adds currentUser._id to ensure the creator is always a member.
+
+
+2.4 Validate that every member ID actually points to an existing user
+for (const id of uniqueMembers) {
+  if (!(await ctx.db.get(id)))
+    throw new Error(`User with ID ${id} not found`);
+}
+
+-> For each id in the set, fetch the user doc; if any id is missing, throw an error.
+-> This prevents creating a group with invalid user references.
+
+Note: This is sequential await inside a for loop — for many members this is slower. You could Promise.all([...uniqueMembers].map(id => ctx.db.get(id))) to validate in parallel.
+
+
+2.5 Insert the group document
+return await ctx.db.insert("groups", {
+  name: args.name.trim(),
+  description: args.description?.trim() ?? "",
+  createdBy: currentUser._id,
+  members: [...uniqueMembers].map((id) => ({
+    userId: id,
+    role: id === currentUser._id ? "admin" : "member",
+    joinedAt: Date.now(),
+  })),
+});
+
+Inserts a new groups document with:
+-> name trimmed.
+-> description trimmed or "" if absent.
+-> createdBy set to the creator’s ID.
+-> members array built from uniqueMembers:
+    -> userId — member id
+    -> role — "admin" for creator, "member" otherwise
+    -> joinedAt — timestamp from Date.now() (milliseconds since epoch)
+-> Returns whatever ctx.db.insert returns (typically the newly created record id).
+
+*/

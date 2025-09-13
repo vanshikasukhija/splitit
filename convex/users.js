@@ -1,4 +1,4 @@
-import { mutation } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 
 export const store = mutation({
   args: {},
@@ -40,3 +40,25 @@ export const store = mutation({
 // There are two things in convex:
 // 1.) Mutation: It means to manipulate (CRUD) the data
 // 2.) Query: It means to fetch the data
+
+
+export const getCurrentUser = query({
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if(!identity){
+      throw new Error("not authenticated");
+    }
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", (q) => {
+        q.eq("tokenIdentifier", identity.tokenIdentifier);
+      })
+      .first();
+
+      if(!user){
+        throw new Error("User not found");
+      }
+      return user;
+  },
+})
