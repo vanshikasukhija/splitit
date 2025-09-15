@@ -28,7 +28,7 @@ export const store = mutation({
     }
     // If it's a new identity, create a new `User`.
     return await ctx.db.insert("users", {
-      name: identity.name ?? "Anonymous",
+      name: identity.name || identity.firstName || identity.email?.split("@")[0] || "Anonymous",
       tokenIdentifier: identity.tokenIdentifier,
       email: identity.email,
       imageUrl: identity.pictureUrl,
@@ -42,6 +42,7 @@ export const store = mutation({
 // 2.) Query: It means to fetch the data
 
 
+// Get Current User
 export const getCurrentUser = query({
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -51,9 +52,9 @@ export const getCurrentUser = query({
 
     const user = await ctx.db
       .query("users")
-      .withIndex("by_token", (q) => {
-        q.eq("tokenIdentifier", identity.tokenIdentifier);
-      })
+      .withIndex("by_token", (q) => 
+        q.eq("tokenIdentifier", identity.tokenIdentifier)
+      )
       .first();
 
       if(!user){
