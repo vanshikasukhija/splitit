@@ -82,7 +82,7 @@ export const getAllContacts = query({
 /* ──────────────────────────────────────────────────────────────────────────
    2. createGroup – create a new group
    ──────────────────────────────────────────────────────────────────────── */
-export const createGroup = mutation({
+export const CreateGroup = mutation({
   args: {
     name: v.string(),
     description: v.optional(v.string()),

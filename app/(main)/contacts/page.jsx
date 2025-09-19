@@ -15,10 +15,33 @@ import { set } from "date-fns";
 
 const ContactsPage = () => {
   const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false);
-
   const { data, isLoading } = useConvexQuery(api.contacts.getAllContacts);
 
-  const router = useRouter();
+  const router = useRouter();     //gives us the ability to change the URL later.
+  const searchParams = useSearchParams();     // lets us read query parameters from the URL.
+
+  useEffect(() => {
+    // If the URL is ...?createGroup=true, then createGroupParam will be "true".
+    const createGroupParam = searchParams.get("createGroup");     
+
+    if(createGroupParam === "true") {
+      setIsCreateGroupModalOpen(true);
+
+      // const url = new URL(window.location.href);     // copy of the current page URL
+      // url.searchParams.delete("createGroup");
+
+      // // Replace the current URL with the cleaned-up version, but don’t reload the page and don’t create a new history entry
+      // router.replace(url.pathname + url.search);
+
+      // Copy current search params
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("createGroup");
+
+    // Replace with same path, but cleaned query
+    router.replace(`?${params.toString()}`);
+    }
+  }, [searchParams, router]);
+
 
   if (isLoading) {
     return (

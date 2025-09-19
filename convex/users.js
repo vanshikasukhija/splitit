@@ -1,4 +1,6 @@
 import { mutation, query } from "./_generated/server";
+import { v } from "convex/values";
+import { internal } from "./_generated/api";
 
 export const store = mutation({
   args: {},
@@ -36,12 +38,6 @@ export const store = mutation({
   },
 });
 
-
-// There are two things in convex:
-// 1.) Mutation: It means to manipulate (CRUD) the data
-// 2.) Query: It means to fetch the data
-
-
 // Get Current User
 export const getCurrentUser = query({
   handler: async (ctx) => {
@@ -60,6 +56,114 @@ export const getCurrentUser = query({
       if(!user){
         throw new Error("User not found");
       }
+
       return user;
   },
 })
+
+// Search users by name or email (for adding participants)
+export const searchUsers = query({
+  args: {
+    query: v.string(),
+  },
+
+  handler: async(ctx, args) => {
+    // Use centralized getCurrentUser function
+    const currentUser = await ctx.runQuery(internal.users.getCurrentUser);
+
+    // Don't search if query is too short
+    if(args.query.length < 2) {
+      return [];
+    }
+
+    // Search by name using search index
+    const nameResults = await ctx.db
+      .query("users")
+      .withSearchIndex("search_name", (q) => q.search("name", args.query))
+      .collect();
+
+    // Search by email using search index
+    const emailResults = await ctx.db
+      .query("users")
+      .withSearchIndex("search_email", (q) => q.search("email", args.query))
+      .collect();
+
+    // Combine results (removing duplicates)
+    const users = [
+      ...nameResults,
+      ...emailResults.filter(
+        (email) => !nameResults.some((name) => name._id === email._id)
+      ),
+    ];
+
+    // Exclude current user and format results
+    return users
+      .filter((user) => user._id !== currentUser._id)
+      .flatMap((user) => ({
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        imageUrl: user.imageUrl,
+      }));
+  },
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// There are two things in convex:
+// 1.) Mutation: It means to manipulate (CRUD) the data
+// 2.) Query: It means to fetch the data
