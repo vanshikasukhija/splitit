@@ -28,7 +28,7 @@ const BalanceSummary = ({ balances }) => {
           <div className="space-y-3">
             {oweDetails.youAreOwedBy.map((item) => (
               <Link
-                href={`/person/${item.user_id}`}
+                href={`/person/${item.userId}`}
                 key={item.userId}
                 className="flex items-center justify-between hover:bg-muted p-2 rounded-md transition-colors"
               >
@@ -79,7 +79,6 @@ const BalanceSummary = ({ balances }) => {
     </div>
   );
 
-  //
 };
 
 export default BalanceSummary;
