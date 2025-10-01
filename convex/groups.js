@@ -2,7 +2,6 @@ import { query } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 
-
 export const getGroupOrMembers = query({
   args: {
     groupId: v.optional(v.id("groups")), // Optional - if provided, will return details for just this group
